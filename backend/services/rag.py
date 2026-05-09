@@ -1,6 +1,10 @@
 """
 RAG (Retrieval-Augmented Generation) service.
 
+Supports two LLM providers, switched via LLM_PROVIDER in .env:
+  - "openai"  — OpenAI ChatOpenAI + OpenAIEmbeddings (default)
+  - "ollama"  — local Ollama ChatOllama + OllamaEmbeddings (no API key needed)
+
 Provides:
 - get_vector_store()  — singleton ChromaDB vector store
 - answer_with_rag()   — retrieves relevant docs then streams an LLM response
@@ -11,8 +15,7 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 
 from langchain_chroma import Chroma
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import get_settings
 
@@ -29,36 +32,64 @@ Rules:
 - Use markdown formatting (bullet points, code blocks, tables) when it improves readability.
 """
 
-TOP_K = 5  # Number of document chunks to retrieve
+TOP_K = 5
+
+
+def _make_embeddings():
+    settings = get_settings()
+    if settings.llm_provider == "ollama":
+        from langchain_ollama import OllamaEmbeddings
+        logger.info("Using Ollama embeddings: %s", settings.ollama_embedding_model)
+        return OllamaEmbeddings(
+            model=settings.ollama_embedding_model,
+            base_url=settings.ollama_base_url,
+        )
+    else:
+        from langchain_openai import OpenAIEmbeddings
+        logger.info("Using OpenAI embeddings: %s", settings.openai_embedding_model)
+        return OpenAIEmbeddings(
+            model=settings.openai_embedding_model,
+            api_key=settings.openai_api_key,
+        )
+
+
+def _make_llm():
+    settings = get_settings()
+    if settings.llm_provider == "ollama":
+        from langchain_ollama import ChatOllama
+        logger.info("Using Ollama LLM: %s", settings.ollama_model)
+        return ChatOllama(
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            temperature=0.2,
+        )
+    else:
+        from langchain_openai import ChatOpenAI
+        logger.info("Using OpenAI LLM: %s", settings.openai_model)
+        return ChatOpenAI(
+            model=settings.openai_model,
+            api_key=settings.openai_api_key,
+            streaming=True,
+            temperature=0.2,
+        )
 
 
 @lru_cache(maxsize=1)
 def get_vector_store() -> Chroma:
     settings = get_settings()
-    embeddings = OpenAIEmbeddings(
-        model=settings.openai_embedding_model,
-        api_key=settings.openai_api_key,
-    )
     return Chroma(
         collection_name="vizor_docs",
-        embedding_function=embeddings,
+        embedding_function=_make_embeddings(),
         persist_directory=settings.chroma_persist_dir,
     )
 
 
 @lru_cache(maxsize=1)
-def get_llm() -> ChatOpenAI:
-    settings = get_settings()
-    return ChatOpenAI(
-        model=settings.openai_model,
-        api_key=settings.openai_api_key,
-        streaming=True,
-        temperature=0.2,
-    )
+def get_llm():
+    return _make_llm()
 
 
 def _retrieve_context(query: str) -> str:
-    """Retrieve the top-K most relevant chunks from ChromaDB."""
     vector_store = get_vector_store()
     results = vector_store.similarity_search(query, k=TOP_K)
     if not results:
@@ -85,12 +116,10 @@ async def answer_with_rag(
         system_content += f"\n\n--- Retrieved Documentation ---\n{context}\n---"
 
     messages = [SystemMessage(content=system_content)]
-    # Include recent conversation history
     for msg in history[-10:]:
         if msg["role"] == "user":
             messages.append(HumanMessage(content=msg["content"]))
         else:
-            from langchain_core.messages import AIMessage
             messages.append(AIMessage(content=msg["content"]))
     messages.append(HumanMessage(content=question))
 
@@ -99,3 +128,4 @@ async def answer_with_rag(
         token = chunk.content
         if token:
             yield token
+
