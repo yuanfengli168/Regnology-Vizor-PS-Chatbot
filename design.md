@@ -1,189 +1,120 @@
 # Regnology Vizor PS Chatbot — Design Document
 
+**Version:** 0.1 | **Date:** 2026-05-09 | **Author:** Jacky Li
+
+---
+
 ## 1. Overview
 
-This document describes the architecture, design decisions, and technical approach for the **Regnology Vizor PS Chatbot** — an AI-powered assistant for Professional Services teams and clients working with the Vizor regulatory reporting platform.
+Internal AI chatbot to help new PS team members get up to speed quickly. It answers questions by searching internal documentation (PDFs, Word docs) first via RAG, then generating a response using an LLM. No login for MVP; designed to add auth and more features incrementally.
+
+**Constraints:** ~10 concurrent users, backend runs on a dev laptop (macOS), frontend hosted on GitHub Pages.
 
 ---
 
-## 2. Goals & Non-Goals
-
-### Goals
-- Provide accurate, context-aware answers to Vizor product and regulatory questions
-- Accelerate PS consultant workflows (implementation, configuration, troubleshooting)
-- Reduce time-to-value for new Vizor clients through guided onboarding
-- Support multi-turn, stateful conversations with memory
-
-### Non-Goals
-- Replace human PS consultants for complex bespoke engagements
-- Process live production regulatory data
-- Provide legally binding regulatory advice
-
----
-
-## 3. System Architecture
+## 2. Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          Client Layer                           │
-│           Web UI (React)  │  Vizor Portal Embed (iFrame)        │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │ HTTPS / WebSocket
-┌───────────────────────────▼─────────────────────────────────────┐
-│                       API Gateway / BFF                         │
-│                  FastAPI  |  Auth (Azure AD)                     │
-└────────────┬──────────────────────────────┬────────────────────┘
-             │                              │
-┌────────────▼────────────┐   ┌─────────────▼──────────────────┐
-│   Conversation Service   │   │      RAG Pipeline              │
-│  - Session management    │   │  - Query embedding             │
-│  - History storage       │   │  - Vector similarity search    │
-│  - Context window mgmt   │   │  - Document retrieval          │
-└────────────┬────────────┘   └─────────────┬──────────────────┘
-             │                              │
-┌────────────▼──────────────────────────────▼──────────────────┐
-│                     LLM Orchestration Layer                    │
-│              LangChain / LlamaIndex  |  Prompt Templates       │
-└────────────────────────────┬─────────────────────────────────┘
-                             │
-         ┌───────────────────┼───────────────────┐
-         │                   │                   │
-┌────────▼────────┐ ┌────────▼────────┐ ┌───────▼────────┐
-│  Azure OpenAI   │ │  Vector Store   │ │  Knowledge DB  │
-│  GPT-4 / GPT-4o │ │  (Pinecone /    │ │  (PostgreSQL)  │
-│                 │ │   ChromaDB)     │ │                │
-└─────────────────┘ └─────────────────┘ └────────────────┘
+[React UI on GitHub Pages]
+        │  HTTPS (REST + SSE streaming)
+        ▼
+[FastAPI Backend — localhost / ngrok tunnel]
+        │
+        ├── [LangChain RAG Pipeline]
+        │       ├── ChromaDB (vector store, local)
+        │       └── LLM Provider (swappable via config)
+        │
+        ├── [SQLite] — chat history, session metadata
+        │
+        └── [In-memory cache] — frequent Q&A pairs
 ```
 
 ---
 
-## 4. Key Components
+## 3. Frontend (React + Vite → GitHub Pages)
 
-### 4.1 Frontend (React / TypeScript)
+- ChatGPT-style UI: message thread, streaming response, markdown rendering
+- No login for MVP; session identified by browser `localStorage` UUID
+- **Stop Service button** — calls `POST /admin/stop` on the backend (protected by a simple secret token in `.env`)
+- **Auto-deploy:** GitHub Actions workflow on push to `main` → `gh-pages` branch
 
-- **Chat interface** with streaming token output
-- Markdown rendering for structured responses (tables, code blocks)
-- Session persistence via browser localStorage
-- Theme-aligned with Regnology / Vizor brand guidelines
-
-### 4.2 Backend API (FastAPI)
-
-- RESTful + WebSocket endpoints for chat sessions
-- JWT-based auth via Azure AD
-- Rate limiting and request validation
-- Async I/O for high-concurrency support
-
-### 4.3 RAG (Retrieval-Augmented Generation) Pipeline
-
-1. **Document Ingestion** — Vizor product docs, release notes, regulatory frameworks (COREP, FINREP, AnaCredit, DORA) are parsed and chunked
-2. **Embedding** — Chunks embedded via `text-embedding-3-large`
-3. **Vector Store** — Embeddings stored in Pinecone (production) / ChromaDB (local dev)
-4. **Query Flow** — User query → embed → top-k similarity search → inject into LLM context window
-
-### 4.4 Conversation Memory
-
-- **Short-term**: Last N messages passed in LLM context
-- **Long-term**: Summarized session history stored in PostgreSQL
-- **Namespace isolation**: Per-user, per-session memory partitioning
-
-### 4.5 Prompt Engineering
-
-- System prompt defines assistant persona, scope, and tone
-- Few-shot examples cover common Vizor PS scenarios
-- Guardrails prevent hallucination of regulatory specifics
-- Fallback responses route complex queries to human PS team
+**Scalability path:** Add auth (JWT / OAuth2), user history, role-based views.
 
 ---
 
-## 5. Data Flow
+## 4. Backend (Python + FastAPI)
 
-```
-User Message
-     │
-     ▼
-[Input Validation & Sanitization]
-     │
-     ▼
-[Auth Check + Rate Limiter]
-     │
-     ▼
-[Load Conversation History]
-     │
-     ├──► [Embed User Query]
-     │         │
-     │         ▼
-     │    [Vector Search → Retrieve Top-K Docs]
-     │         │
-     ▼         ▼
-[Build Prompt: System + History + Retrieved Docs + User Query]
-     │
-     ▼
-[LLM API Call (streaming)]
-     │
-     ▼
-[Stream tokens to client]
-     │
-     ▼
-[Persist message to conversation history]
-     │
-     ▼
-[Audit Log]
-```
+- **Async FastAPI** with SSE streaming for real-time token output
+- **LangChain** as the orchestration layer — LLM provider is a config switch:
+  - MVP: OpenAI `gpt-4o` (text + image support)
+  - Future: local Ollama (`qwen3-14b` or similar) via same interface
+- **Concurrency:** `uvicorn` with 4 async workers handles 10 simultaneous users comfortably
+- **Caching:** Python `cachetools` TTL cache for repeated questions (exact-match hash key); upgrade to Redis if needed
+- **Rate limiting:** `slowapi` middleware to prevent abuse
+- **Auto-start on laptop boot:** macOS `launchd` plist registers the service; a shell wrapper handles venv activation and port binding
 
 ---
 
-## 6. Security Design
+## 5. Data Layer
 
-| Concern | Approach |
-|---------|----------|
-| Authentication | Azure AD OAuth 2.0 / OIDC |
-| Authorization | Role-based (PS Consultant, Client User, Admin) |
-| Data in Transit | TLS 1.3 everywhere |
-| Data at Rest | AES-256 encryption for stored conversations |
-| PII Handling | PII detection + redaction before LLM submission |
-| Prompt Injection | Input sanitization, output filtering, system prompt hardening |
-| API Keys | Azure Key Vault — never stored in code or env files in prod |
-| Audit Trail | All interactions logged with user ID, timestamp, session ID |
+| Store | Technology | Purpose |
+|-------|-----------|---------|
+| Vector store | ChromaDB (local) | Document embeddings + semantic search |
+| Relational | SQLite | Chat history, session records |
+| Cache | `cachetools` in-process | Frequent Q&A deduplication |
+| Config / secrets | `.env` file | API keys, doc folder path, admin token |
+
+**Upgrade path:** ChromaDB → Qdrant (Docker), SQLite → PostgreSQL, in-process cache → Redis — all are drop-in swaps via LangChain / SQLAlchemy abstractions.
 
 ---
 
-## 7. Regulatory Knowledge Base
+## 6. Document Ingestion Module
 
-### Document Sources
-- Vizor product documentation (all modules)
-- EBA / ECB reporting frameworks: COREP, FINREP, AnaCredit, IREF, DORA
-- Internal Regnology PS runbooks and implementation guides
-- Release notes and changelogs
-
-### Ingestion Pipeline
-- Scheduled nightly refresh for updated docs
-- Version-tagged embeddings to support rollback
-- Human review queue for flagged low-confidence responses
+- Folder path stored in `.env` as `DOCS_FOLDER_PATH`
+- Supported formats: PDF (`pypdf`), Word (`python-docx`), images (via LLM vision)
+- **Pipeline:** Load → chunk (512 tokens, 50-token overlap) → embed (`text-embedding-3-small`) → upsert ChromaDB
+- **Trigger:** Run on backend startup + expose `POST /admin/ingest` endpoint to re-index on demand
+- Images inside documents are extracted and described by the LLM (multimodal), then stored as text chunks
 
 ---
 
-## 8. Scalability & Deployment
+## 7. Deployment
 
-- **Containerized** via Docker; orchestrated with Kubernetes (AKS)
-- **Horizontal scaling** for API and conversation services
-- **Caching layer** (Redis) for frequently asked questions
-- **Blue/green deployment** for zero-downtime releases
-- **Monitoring**: Azure Monitor + Application Insights + Grafana dashboards
+### Frontend
+- `main` branch push → GitHub Actions → `vite build` → deploy to `gh-pages`
+- Environment variable `VITE_API_URL` points to backend URL (ngrok or static IP)
 
----
-
-## 9. Open Questions / Future Considerations
-
-- [ ] Fine-tuning a domain-specific model on Vizor PS data
-- [ ] Integration with Vizor ticketing / case management system
-- [ ] Voice interface for hands-free PS consultant support
-- [ ] Multilingual support (DE, FR, IT, ES) for EU regulatory reporting clients
-- [ ] Feedback loop: thumbs up/down training signal for RLHF
+### Backend (macOS laptop)
+- `launchd` plist at `~/Library/LaunchAgents/com.regnology.vizor-chatbot.plist`
+- Service starts on login, restarts on crash
+- **Stop endpoint:** `POST /admin/stop` (bearer token auth) shuts down uvicorn gracefully; frontend exposes this as a button
+- Exposed via **ngrok** (free tier) or local network IP for team access
 
 ---
 
-## 10. Revision History
+## 8. Recommended Next Steps (MVP 1.0 → 1.x)
 
-| Version | Date | Author | Notes |
-|---------|------|--------|-------|
-| 0.1 | 2026-05-09 | Jacky Li | Initial draft |
+| Priority | Feature |
+|----------|---------|
+| High | Add user login (JWT + simple user table) |
+| High | Feedback buttons (👍/👎) to flag bad answers |
+| Medium | Nightly re-ingestion cron job for updated docs |
+| Medium | Source citation — show which doc/chunk the answer came from |
+| Low | Switch to local Ollama model for offline/private use |
+| Low | Multilingual support for non-English docs |
+
+---
+
+## 9. Tech Stack Summary
+
+| Layer | Choice |
+|-------|--------|
+| Frontend | React + Vite + TypeScript |
+| Frontend hosting | GitHub Pages (via GitHub Actions) |
+| Backend | Python 3.12 + FastAPI + LangChain |
+| LLM (MVP) | OpenAI `gpt-4o` |
+| LLM (future) | Ollama (`qwen3-14b`) |
+| Vector DB | ChromaDB → Qdrant |
+| Relational DB | SQLite → PostgreSQL |
+| Cache | `cachetools` → Redis |
+| Backend hosting | macOS laptop via `launchd` + ngrok |
