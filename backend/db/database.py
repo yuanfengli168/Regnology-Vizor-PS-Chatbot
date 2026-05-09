@@ -27,6 +27,6 @@ def get_db():
 
 
 def init_db() -> None:
-    """Create all tables on startup."""
+    """Create all tables on startup (skips tables that already exist)."""
     from db import models  # noqa: F401 — import so models are registered
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, checkfirst=True)
