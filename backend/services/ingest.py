@@ -6,9 +6,13 @@ embeds them, and upserts into ChromaDB.
 """
 
 import logging
+import io
 import shutil
 from pathlib import Path
 
+import fitz  # pymupdf
+import pytesseract
+from PIL import Image
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader
 from langchain_core.documents import Document
@@ -23,17 +27,49 @@ CHUNK_OVERLAP = 100
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
 
+def _ocr_pdf_images(path: Path) -> list[Document]:
+    """Extract images from a PDF and OCR them into Documents."""
+    docs = []
+    try:
+        pdf = fitz.open(str(path))
+        for page_num, page in enumerate(pdf):
+            for img in page.get_images(full=True):
+                xref = img[0]
+                base_image = pdf.extract_image(xref)
+                image = Image.open(io.BytesIO(base_image["image"]))
+                # Skip tiny images (icons, bullets, etc.)
+                if image.width < 100 or image.height < 100:
+                    continue
+                text = pytesseract.image_to_string(image).strip()
+                if text:
+                    logger.info("OCR page %d: %d chars extracted", page_num, len(text))
+                    docs.append(Document(
+                        page_content=text,
+                        metadata={"source": path.name, "page": page_num, "type": "ocr"},
+                    ))
+        pdf.close()
+    except Exception:
+        logger.exception("OCR failed for: %s", path)
+    return docs
+
+
 def _load_file(path: Path) -> list[Document]:
     """Load a single file and return a list of LangChain Documents."""
     suffix = path.suffix.lower()
     try:
         if suffix == ".pdf":
             loader = PyPDFLoader(str(path))
+            docs = loader.load()
+            # Also OCR any embedded images (screenshots, Teams chats, etc.)
+            ocr_docs = _ocr_pdf_images(path)
+            if ocr_docs:
+                logger.info("OCR extracted %d image-doc(s) from %s", len(ocr_docs), path.name)
+            docs.extend(ocr_docs)
         elif suffix in {".docx", ".doc"}:
             loader = Docx2txtLoader(str(path))
+            docs = loader.load()
         else:
             return []
-        docs = loader.load()
         # Tag each chunk with the source filename
         for doc in docs:
             doc.metadata["source"] = path.name
