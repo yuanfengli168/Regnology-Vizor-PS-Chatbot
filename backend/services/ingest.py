@@ -6,6 +6,7 @@ embeds them, and upserts into ChromaDB.
 """
 
 import logging
+import shutil
 from pathlib import Path
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -18,7 +19,7 @@ from services.rag import get_vector_store
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 512
-CHUNK_OVERLAP = 50
+CHUNK_OVERLAP = 100
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
 
@@ -64,6 +65,13 @@ def ingest_documents() -> dict[str, int]:
     if not raw_docs:
         logger.info("No content extracted from documents.")
         return {"files_found": len(files), "chunks_indexed": 0}
+
+    # Wipe existing ChromaDB to prevent duplicates accumulating across restarts
+    chroma_dir = Path(settings.chroma_persist_dir)
+    if chroma_dir.exists():
+        shutil.rmtree(chroma_dir)
+        logger.info("Cleared existing ChromaDB at %s", chroma_dir)
+    get_vector_store.cache_clear()
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,

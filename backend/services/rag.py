@@ -32,7 +32,7 @@ Rules:
 - Use markdown formatting (bullet points, code blocks, tables) when it improves readability.
 """
 
-TOP_K = 5
+TOP_K = 10
 
 
 def _make_embeddings():
@@ -91,13 +91,18 @@ def get_llm():
 
 def _retrieve_context(query: str) -> str:
     vector_store = get_vector_store()
-    results = vector_store.similarity_search(query, k=TOP_K)
+    results = vector_store.similarity_search_with_relevance_scores(query, k=TOP_K)
     if not results:
+        logger.info("RAG retrieval: no chunks found for query: %s", query[:80])
         return ""
     parts = []
-    for i, doc in enumerate(results, 1):
+    logger.info("RAG retrieval for query: %r", query[:80])
+    for i, (doc, score) in enumerate(results, 1):
         source = doc.metadata.get("source", "unknown")
-        parts.append(f"[{i}] (Source: {source})\n{doc.page_content}")
+        page = doc.metadata.get("page", "?")
+        preview = doc.page_content[:120].replace("\n", " ")
+        logger.info("  [%d] score=%.4f  src=%s  page=%s  preview: %s", i, score, source, page, preview)
+        parts.append(f"[{i}] (Source: {source}, page {page})\n{doc.page_content}")
     return "\n\n".join(parts)
 
 
