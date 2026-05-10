@@ -49,7 +49,13 @@ async def _stream_response(request: ChatRequest, db: DBSession):
     cached = get_cached_answer(question, session_id)
     if cached:
         logger.info("Cache hit for session %s", session_id)
-        yield f"data: {cached}\n\n"
+        # Stream cached answer token-by-token to keep SSE framing valid
+        # (a single yield with \n\n inside would break SSE event boundaries)
+        for token in cached:
+            if token == "\n":
+                yield "data: \n\n"
+            else:
+                yield f"data: {token}\n\n"
         yield "data: [DONE]\n\n"
         db.add(Message(session_id=session_id, role="assistant", content=cached))
         db.commit()
