@@ -62,6 +62,9 @@ def _make_llm():
             model=settings.ollama_model,
             base_url=settings.ollama_base_url,
             temperature=0.2,
+            # Disable Qwen3 chain-of-thought thinking mode — not needed for RAG Q&A
+            # and roughly halves response latency. Has no effect on other models.
+            think=False,
         )
     else:
         from langchain_openai import ChatOpenAI

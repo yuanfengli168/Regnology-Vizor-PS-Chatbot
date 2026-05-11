@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.database import Base
@@ -26,3 +26,14 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
 
     session: Mapped["Session"] = relationship("Session", back_populates="messages")
+
+
+class DocIngestionRecord(Base):
+    """Tracks which files have been ingested so we can skip unchanged ones on restart."""
+    __tablename__ = "doc_ingestion_records"
+
+    filename: Mapped[str] = mapped_column(String(512), primary_key=True)
+    mtime: Mapped[float] = mapped_column(Float)   # os.path.getmtime
+    size: Mapped[int] = mapped_column(Integer)    # bytes
+    chunks_indexed: Mapped[int] = mapped_column(Integer)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime, default=func.now())
