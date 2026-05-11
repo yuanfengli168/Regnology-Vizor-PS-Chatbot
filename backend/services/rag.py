@@ -30,6 +30,10 @@ Rules:
 - If the documentation does not contain enough information to answer, say so clearly. Do not make things up.
 - Be concise, accurate, and friendly.
 - Use markdown formatting (bullet points, code blocks, tables) when it improves readability.
+- PRIORITY RULE: If any excerpt contains a direct confirmation from a real team member that a specific
+  action resolved an issue (e.g. in a Teams conversation, meeting note, or personal work note), present
+  that confirmed fix FIRST and prominently — before any generic troubleshooting steps. Quote the person
+  and their fix directly. Generic steps come after, clearly labelled as secondary.
 """
 
 TOP_K = 10
@@ -92,19 +96,46 @@ def get_llm():
     return _make_llm()
 
 
+def _reorder_for_lost_in_middle(
+    results: list[tuple],
+) -> list[tuple]:
+    """
+    Mitigate the 'lost in the middle' problem: LLMs pay most attention to
+    content at the start and end of their context window, and tend to ignore
+    content in the middle. So we place the highest-scoring chunk first, the
+    second-highest last, and fill the middle with the remaining chunks.
+
+    Example for 5 chunks ranked [A, B, C, D, E] by score:
+      Output order: [A, C, D, E, B]
+    """
+    if len(results) <= 2:
+        return results
+    best = results[0]
+    second_best = results[1]
+    middle = results[2:]
+    return [best] + middle + [second_best]
+
+
 def _retrieve_context(query: str) -> str:
     vector_store = get_vector_store()
     results = vector_store.similarity_search_with_relevance_scores(query, k=TOP_K)
     if not results:
         logger.info("RAG retrieval: no chunks found for query: %s", query[:80])
         return ""
-    parts = []
+
     logger.info("RAG retrieval for query: %r", query[:80])
     for i, (doc, score) in enumerate(results, 1):
         source = doc.metadata.get("source", "unknown")
         page = doc.metadata.get("page", "?")
         preview = doc.page_content[:120].replace("\n", " ")
         logger.info("  [%d] score=%.4f  src=%s  page=%s  preview: %s", i, score, source, page, preview)
+
+    # Reorder to reduce lost-in-the-middle effect before passing to LLM
+    reordered = _reorder_for_lost_in_middle(results)
+    parts = []
+    for i, (doc, _score) in enumerate(reordered, 1):
+        source = doc.metadata.get("source", "unknown")
+        page = doc.metadata.get("page", "?")
         parts.append(f"[{i}] (Source: {source}, page {page})\n{doc.page_content}")
     return "\n\n".join(parts)
 
